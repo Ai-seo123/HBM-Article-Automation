@@ -72,6 +72,10 @@ def _make_engine():
     if not db_url:
         db_url = default_sqlite_url
 
+    # Normalize Render's postgres:// scheme to postgresql:// for SQLAlchemy
+    if db_url.startswith("postgres://"):
+        db_url = db_url.replace("postgres://", "postgresql://", 1)
+
     if db_url.startswith("sqlite"):
         return create_engine(
             db_url,
