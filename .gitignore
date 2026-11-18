@@ -1,0 +1,52 @@
+# Environment & Secrets (Never commit secrets to Git)
+.env
+.env.*
+!.env.example
+*.local
+
+# SQLite Databases & Backups (Keep local data off Git)
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.db.tmp
+*.backup
+
+# Logs
+*.log
+logs/
+
+# Python runtime & caches
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+ENV/
+
+# Node & Frontend Build
+node_modules/
+dist/
+dist-ssr/
+
+# Runtime Storage (Preserve folders with .gitkeep, ignore generated session files)
+backend/storage/wizard_sessions/*.json
+backend/storage/backups/*
+!backend/storage/wizard_sessions/.gitkeep
+!backend/storage/backups/.gitkeep
+
+# Development-only Scratch & Test Artifacts
+backend/scratch/
+backend/raw_message.json
+backend/test_run_output.txt
+backend/scratch_test.py
+backend/test2.py
+backend/test_bc.py
+backend/start_sidecar.py
+
+# OS & Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
