@@ -296,14 +296,13 @@ def select_account_for_employee(
 
 
 # ---------------------------------------------------------------------------
-# Strict Manual-Only Token Refresh
+# Token Refresh Helpers (Automatic & Manual)
 # ---------------------------------------------------------------------------
 
-async def refresh_employee_token_manual(db: Session, employee_id: int) -> dict:
+def refresh_employee_token_sync(db: Session, employee_id: int) -> dict:
     """
-    Manually refresh the authenticated employee's access token using their stored refresh token.
-    Strictly manual: only executed when employee explicitly clicks 'Refresh Connection'.
-    Zero automatic retries or background refresh.
+    Synchronously refresh the authenticated employee's access token using their stored refresh token.
+    Updates the database with the fresh access token, new refresh token (if rotated), and updated expires_at.
     """
     record = get_employee_token_record(db, employee_id)
     if not record or not record.encrypted_refresh_token:
@@ -330,24 +329,24 @@ async def refresh_employee_token_manual(db: Session, employee_id: int) -> dict:
         "refresh_token": plain_refresh_token,
     }
 
-    async with httpx.AsyncClient(timeout=15) as client:
-        try:
-            resp = await client.post(BASECAMP_TOKEN_URL, data=payload)
+    try:
+        with httpx.Client(timeout=15) as client:
+            resp = client.post(BASECAMP_TOKEN_URL, data=payload)
             if resp.status_code != 200:
                 log.warning("Basecamp refresh returned HTTP %s for employee %s: %s", resp.status_code, employee_id, resp.text)
                 return {
                     "success": False,
                     "error": "refresh_rejected",
-                    "message": "Basecamp token refresh was rejected or revoked. Please click 'Reconnect Basecamp'.",
+                    "message": "Basecamp token refresh was rejected or revoked. Please reconnect Basecamp.",
                 }
             data = resp.json()
-        except Exception as exc:
-            log.error("Basecamp token refresh request error for employee %s: %s", employee_id, exc)
-            return {
-                "success": False,
-                "error": "network_error",
-                "message": f"Could not reach Basecamp authorization server: {exc}",
-            }
+    except Exception as exc:
+        log.error("Basecamp token refresh request error for employee %s: %s", employee_id, exc)
+        return {
+            "success": False,
+            "error": "network_error",
+            "message": f"Could not reach Basecamp authorization server: {exc}",
+        }
 
     new_access = data.get("access_token")
     if not new_access:
@@ -367,12 +366,20 @@ async def refresh_employee_token_manual(db: Session, employee_id: int) -> dict:
 
     db.commit()
     db.refresh(record)
-    log.info("Employee %s Basecamp token successfully refreshed manually.", employee_id)
+    log.info("Employee %s Basecamp token successfully refreshed.", employee_id)
     return {
         "success": True,
         "message": "Basecamp connection refreshed successfully.",
         "expires_at": record.expires_at,
     }
+
+
+async def refresh_employee_token_manual(db: Session, employee_id: int) -> dict:
+    """
+    Refresh the authenticated employee's access token using their stored refresh token.
+    Called on explicit manual refresh or endpoint action.
+    """
+    return refresh_employee_token_sync(db, employee_id)
 
 
 def disconnect_employee(db: Session, employee_id: int) -> dict:
@@ -390,6 +397,8 @@ def get_connection_status(employee_id: Optional[int] = None) -> dict:
     """
     Return connection status for the authenticated employee.
     If employee_id is None, checks active request context or test singleton.
+    If token is expired, attempts automatic refresh before reporting status.
+    Returns connected=True only if the token is valid or successfully refreshed.
     Never exposes raw tokens.
     """
     emp_id = employee_id if employee_id is not None else get_current_employee_id()
@@ -408,12 +417,25 @@ def get_connection_status(employee_id: Optional[int] = None) -> dict:
                     }
                 return {"connected": False}
 
+            # If token is expired, attempt transparent refresh to verify/restore health
+            is_expired = record.is_expired()
+            if is_expired and record.encrypted_refresh_token:
+                log.info("Basecamp token expired during status check for employee %s. Attempting auto-refresh...", emp_id)
+                refresh_res = refresh_employee_token_sync(db, emp_id)
+                if refresh_res.get("success"):
+                    record = get_employee_token_record(db, emp_id)
+                    is_expired = record.is_expired() if record else True
+                else:
+                    log.warning("Status check refresh failed for employee %s: %s", emp_id, refresh_res.get("error"))
+
+            is_connected = bool(record and not is_expired)
             return {
-                "connected": True,
-                "account_id": record.account_id,
-                "account_name": record.account_name or f"Account {record.account_id}",
-                "is_expired": record.is_expired(),
-                "expires_at": record.expires_at,
+                "connected": is_connected,
+                "account_id": record.account_id if record else None,
+                "account_name": (record.account_name or f"Account {record.account_id}") if record else None,
+                "is_expired": is_expired,
+                "expired": is_expired,
+                "expires_at": record.expires_at if record else None,
             }
         finally:
             db.close()
@@ -431,7 +453,8 @@ def _resolve_employee_auth(employee_id: Optional[int] = None) -> Tuple[str, str]
     Resolve (access_token, account_id) for the active employee.
     Strictly isolated: Uses employee's stored account_id and decrypted access token.
     Global BASECAMP_ACCOUNT_ID never overrides an employee's connected account.
-    Raises RuntimeError if not connected or expired (manual refresh required).
+    If access token is expired, automatically attempts a transparent token refresh.
+    Raises RuntimeError if not connected or unrefreshable.
     """
     emp_id = employee_id if employee_id is not None else get_current_employee_id()
     if emp_id is not None:
@@ -441,7 +464,14 @@ def _resolve_employee_auth(employee_id: Optional[int] = None) -> Tuple[str, str]
             if not record:
                 raise RuntimeError("not_connected")
             if record.is_expired():
-                raise RuntimeError("basecamp_token_expired")
+                log.info("Basecamp access token for employee %s is expired. Attempting automatic refresh...", emp_id)
+                refresh_res = refresh_employee_token_sync(db, emp_id)
+                if not refresh_res.get("success"):
+                    log.warning("Automatic Basecamp token refresh failed for employee %s: %s", emp_id, refresh_res.get("error"))
+                    raise RuntimeError("basecamp_token_expired")
+                record = get_employee_token_record(db, emp_id)
+                if not record or record.is_expired():
+                    raise RuntimeError("basecamp_token_expired")
 
             access_token = decrypt_token(record.encrypted_access_token)
             account_id = str(record.account_id)
@@ -466,7 +496,7 @@ def get_valid_token(employee_id: Optional[int] = None) -> str:
 async def _bc_get(url: str, employee_id: Optional[int] = None) -> dict | list:
     """
     Perform an authenticated GET request to Basecamp API.
-    Zero automated refresh: on 401 raises basecamp_token_expired requiring user click.
+    Attempts automatic token refresh and retry once if Basecamp returns 401.
     """
     token, _ = _resolve_employee_auth(employee_id)
     headers = {
@@ -474,11 +504,24 @@ async def _bc_get(url: str, employee_id: Optional[int] = None) -> dict | list:
         "User-Agent": _USER_AGENT,
         "Accept": "application/json",
     }
+    emp_id = employee_id if employee_id is not None else get_current_employee_id()
     async with httpx.AsyncClient(timeout=20) as client:
         try:
             resp = await client.get(url, headers=headers)
+            if resp.status_code == 401 and emp_id is not None:
+                log.warning("Basecamp returned 401 Unauthorized for URL %s. Attempting refresh and retry...", url)
+                db = SessionLocal()
+                try:
+                    ref_res = refresh_employee_token_sync(db, emp_id)
+                    if ref_res.get("success"):
+                        new_token, _ = _resolve_employee_auth(emp_id)
+                        headers["Authorization"] = f"Bearer {new_token}"
+                        resp = await client.get(url, headers=headers)
+                finally:
+                    db.close()
+
             if resp.status_code == 401:
-                log.warning("Basecamp returned 401 Unauthorized for URL %s. Manual refresh required.", url)
+                log.warning("Basecamp returned 401 Unauthorized for URL %s.", url)
                 raise RuntimeError("basecamp_token_expired")
             resp.raise_for_status()
         except httpx.HTTPStatusError as exc:
@@ -498,7 +541,7 @@ async def _bc_get_paginated(
 ) -> list:
     """
     Fetch pages of a Basecamp API endpoint.
-    Zero automated refresh: on 401 raises basecamp_token_expired.
+    Attempts automatic token refresh and retry once if Basecamp returns 401.
     Optionally limits to max_pages or stops if all items on a page are older than stop_before_date.
     """
     token, _ = _resolve_employee_auth(employee_id)
@@ -507,6 +550,7 @@ async def _bc_get_paginated(
         "User-Agent": _USER_AGENT,
         "Accept": "application/json",
     }
+    emp_id = employee_id if employee_id is not None else get_current_employee_id()
     results = []
     next_url: Optional[str] = url
     page_count = 0
@@ -517,8 +561,20 @@ async def _bc_get_paginated(
                 break
             try:
                 resp = await client.get(next_url, headers=headers)
+                if resp.status_code == 401 and emp_id is not None:
+                    log.warning("Basecamp returned 401 Unauthorized for paginated URL %s. Attempting refresh and retry...", next_url)
+                    db = SessionLocal()
+                    try:
+                        ref_res = refresh_employee_token_sync(db, emp_id)
+                        if ref_res.get("success"):
+                            new_token, _ = _resolve_employee_auth(emp_id)
+                            headers["Authorization"] = f"Bearer {new_token}"
+                            resp = await client.get(next_url, headers=headers)
+                    finally:
+                        db.close()
+
                 if resp.status_code == 401:
-                    log.warning("Basecamp returned 401 Unauthorized for paginated URL %s. Manual refresh required.", next_url)
+                    log.warning("Basecamp returned 401 Unauthorized for paginated URL %s.", next_url)
                     raise RuntimeError("basecamp_token_expired")
                 resp.raise_for_status()
             except httpx.HTTPStatusError as exc:

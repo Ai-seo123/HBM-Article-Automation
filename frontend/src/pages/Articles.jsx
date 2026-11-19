@@ -466,9 +466,9 @@ export default function Articles() {
   const [connChecked, setConnChecked]     = useState(false)
 
   useEffect(() => {
-    fetch(`${API_BASE}/api/basecamp/status`)
+    fetch(`${API_BASE}/api/basecamp/status`, { credentials: 'include' })
       .then(r => r.json())
-      .then(d => { setConnected(d.connected ?? false); setConnChecked(true) })
+      .then(d => { setConnected(Boolean(d.connected && !d.is_expired && !d.expired)); setConnChecked(true) })
       .catch(() => setConnChecked(true))
   }, [])
 
@@ -477,7 +477,7 @@ export default function Articles() {
     if (!connected) return
     setProjectsLoading(true)
     setProjectsError(null)
-    fetch(`${API_BASE}/api/basecamp/projects`)
+    fetch(`${API_BASE}/api/basecamp/projects`, { credentials: 'include' })
       .then(r => r.json())
       .then(d => setProjects(d.projects ?? []))
       .catch(() => setProjectsError('Could not load projects.'))

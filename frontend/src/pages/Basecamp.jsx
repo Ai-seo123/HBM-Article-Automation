@@ -346,10 +346,10 @@ export default function Basecamp() {
   const fetchStatus = useCallback(async () => {
     setStatusLoading(true)
     try {
-      const res = await fetch(`${API_BASE}/api/basecamp/status`)
+      const res = await fetch(`${API_BASE}/api/basecamp/status`, { credentials: 'include' })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const data = await res.json()
-      setConnected(data.connected ?? false)
+      setConnected(Boolean(data.connected && !data.is_expired && !data.expired))
     } catch {
       setBanner({
         type: 'error',
@@ -381,7 +381,7 @@ export default function Basecamp() {
     setMessages([])
     setSelectedMessage(null)
     try {
-      const res = await fetch(`${API_BASE}/api/basecamp/projects`)
+      const res = await fetch(`${API_BASE}/api/basecamp/projects`, { credentials: 'include' })
       if (!res.ok) {
         const body = await res.json().catch(() => ({}))
         throw new Error(body.message || `HTTP ${res.status}`)
@@ -425,7 +425,10 @@ export default function Basecamp() {
   async function handleDisconnect() {
     setActionLoading(true)
     try {
-      const res = await fetch(`${API_BASE}/api/basecamp/disconnect`, { method: 'POST' })
+      const res = await fetch(`${API_BASE}/api/basecamp/disconnect`, {
+        method: 'POST',
+        credentials: 'include',
+      })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       setConnected(false)
       setBanner({ type: 'info', message: 'Basecamp disconnected.' })

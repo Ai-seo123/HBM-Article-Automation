@@ -30,14 +30,19 @@ app.use(express.json({ limit: "4mb" }));
 const SECRET = process.env.BCWP_SECRET || "";
 const PORT = process.env.PORT || 3939;
 
+// Health check endpoint (public for Render deployment liveness probes & backend ping)
+app.get("/health", (req, res) => res.json({ ok: true, service: "yoast-sidecar" }));
+
+// Security middleware: strictly authenticates all other endpoints
 app.use((req, res, next) => {
-  if (SECRET && req.get("X-BCWP-Secret") !== SECRET) {
+  if (!SECRET) {
+    return res.status(500).json({ error: "Server misconfiguration: BCWP_SECRET is not configured." });
+  }
+  if (req.get("X-BCWP-Secret") !== SECRET) {
     return res.status(403).json({ error: "forbidden" });
   }
   next();
 });
-
-app.get("/health", (req, res) => res.json({ ok: true }));
 
 app.post("/analyze", (req, res) => {
   const {

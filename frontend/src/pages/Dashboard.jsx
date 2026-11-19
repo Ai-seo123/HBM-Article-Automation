@@ -119,12 +119,15 @@ export default function Dashboard() {
   // ── 2. Basecamp Auth State
   const [connected, setConnected]           = useState(false)
   const [statusLoading, setStatusLoading]   = useState(true)
+  const [tokenExpired, setTokenExpired]     = useState(false)
+  const [refreshingBc, setRefreshingBc]     = useState(false)
   const [banner, setBanner]                 = useState(null)
 
   // ── 3. Date, Project & Messages
   const [selectedDate, setSelectedDate]     = useState('')
   const [projects, setProjects]             = useState([])
   const [projectsLoading, setProjectsLoading] = useState(false)
+  const [projectsError, setProjectsError]   = useState(null)
   const [selectedProject, setSelectedProject] = useState(null)
   
   const [messages, setMessages]             = useState([])
@@ -407,33 +410,69 @@ export default function Dashboard() {
   const fetchStatus = useCallback(async () => {
     setStatusLoading(true)
     try {
-      const res = await (authFetch || fetch)(`${API_BASE}/api/basecamp/status`)
+      const res = await (authFetch || fetch)(`${API_BASE}/api/basecamp/status`, { credentials: 'include' })
       if (!res.ok) throw new Error()
       const data = await res.json()
-      setConnected(data.connected ?? false)
+      const isConn = Boolean(data.connected && !data.is_expired && !data.expired)
+      setConnected(isConn)
+      setTokenExpired(Boolean(data.is_expired || data.expired))
     } catch {
       setBanner({ type: 'error', message: 'Backend unreachable.' })
     } finally {
       setStatusLoading(false)
     }
-  }, [])
+  }, [authFetch])
 
   useEffect(() => { fetchStatus() }, [fetchStatus])
 
   // Fetch Projects when Basecamp is connected
   const fetchProjects = useCallback(async () => {
     setProjectsLoading(true)
+    setProjectsError(null)
     try {
-      const res = await (authFetch || fetch)(`${API_BASE}/api/basecamp/projects`)
-      if (!res.ok) throw new Error('Failed to load projects')
+      const res = await (authFetch || fetch)(`${API_BASE}/api/basecamp/projects`, { credentials: 'include' })
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}))
+        if (res.status === 401 || body.error === 'basecamp_token_expired') {
+          setTokenExpired(true)
+          setConnected(false)
+          throw new Error(body.message || 'Basecamp session expired. Please refresh your connection.')
+        }
+        throw new Error(body.message || 'Failed to load projects')
+      }
       const data = await res.json()
       setProjects(data.projects ?? [])
-    } catch {
+      setTokenExpired(false)
+    } catch (err) {
       setProjects([])
+      setProjectsError(err.message || 'Failed to load projects')
     } finally {
       setProjectsLoading(false)
     }
-  }, [])
+  }, [authFetch])
+
+  const handleRefreshBasecamp = useCallback(async () => {
+    setRefreshingBc(true)
+    try {
+      const res = await (authFetch || fetch)(`${API_BASE}/api/basecamp/refresh`, {
+        method: 'POST',
+        credentials: 'include',
+      })
+      const data = await res.json().catch(() => ({}))
+      if (res.ok && data.success) {
+        setTokenExpired(false)
+        await fetchStatus()
+        await fetchProjects()
+        setBanner({ type: 'success', message: 'Basecamp connection refreshed successfully.' })
+      } else {
+        setBanner({ type: 'error', message: data.message || data.detail || 'Could not refresh Basecamp connection. Please reconnect.' })
+      }
+    } catch {
+      setBanner({ type: 'error', message: 'Failed to refresh Basecamp connection.' })
+    } finally {
+      setRefreshingBc(false)
+    }
+  }, [authFetch, fetchStatus, fetchProjects])
 
   useEffect(() => {
     if (connected) fetchProjects()
@@ -1527,9 +1566,25 @@ export default function Dashboard() {
               </div>
 
               {!connected ? (
-                <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg p-2.5">
-                  Please connect Basecamp before selecting or processing articles.
-                </p>
+                tokenExpired ? (
+                  <div className="flex items-center justify-between text-xs p-2.5 bg-amber-50 border border-amber-200 rounded-lg">
+                    <div className="space-y-0.5">
+                      <span className="text-amber-800 font-semibold block">Basecamp Session Expired</span>
+                      <span className="text-amber-600 text-[11px]">Your access token has expired. Click refresh to renew.</span>
+                    </div>
+                    <button
+                      onClick={handleRefreshBasecamp}
+                      disabled={refreshingBc}
+                      className="px-3 py-1.5 bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white rounded font-semibold text-xs transition-colors shadow-xs"
+                    >
+                      {refreshingBc ? 'Refreshing...' : 'Refresh Connection'}
+                    </button>
+                  </div>
+                ) : (
+                  <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg p-2.5">
+                    Please connect Basecamp before selecting or processing articles.
+                  </p>
+                )
               ) : (
                 <div className="flex items-center justify-between text-xs text-slate-600 pt-0.5">
                   <span>Basecamp Account Connected</span>
@@ -1571,14 +1626,30 @@ export default function Dashboard() {
                       Project
                     </label>
                     {projectsLoading ? <Spinner label="Loading projects..." /> : (
-                      <select
-                        className="w-full text-xs font-medium border border-slate-300 rounded-lg p-2.5 bg-white focus:ring-indigo-500 focus:border-indigo-500"
-                        value={selectedProject?.id || ''}
-                        onChange={e => setSelectedProject(projects.find(p => String(p.id) === e.target.value))}
-                      >
-                        <option value="">-- Select Project --</option>
-                        {projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
-                      </select>
+                      <>
+                        <select
+                          className="w-full text-xs font-medium border border-slate-300 rounded-lg p-2.5 bg-white focus:ring-indigo-500 focus:border-indigo-500"
+                          value={selectedProject?.id || ''}
+                          onChange={e => setSelectedProject(projects.find(p => String(p.id) === e.target.value))}
+                        >
+                          <option value="">-- Select Project --</option>
+                          {projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                        </select>
+                        {projectsError && (
+                          <div className="mt-1.5 flex items-center justify-between text-[11px] text-red-600 bg-red-50 border border-red-200 rounded p-1.5">
+                            <span>{projectsError}</span>
+                            {tokenExpired && (
+                              <button
+                                onClick={handleRefreshBasecamp}
+                                disabled={refreshingBc}
+                                className="font-bold underline hover:text-red-800 ml-2"
+                              >
+                                {refreshingBc ? 'Refreshing...' : 'Refresh'}
+                              </button>
+                            )}
+                          </div>
+                        )}
+                      </>
                     )}
                   </div>
                 </div>

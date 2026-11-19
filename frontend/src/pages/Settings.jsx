@@ -533,7 +533,7 @@ function StatusIndicator({ status }) {
       </span>
     )
   }
-  if (status.expired) {
+  if (status.expired || status.is_expired) {
     return (
       <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-amber-100 text-amber-700 text-xs font-semibold ring-1 ring-amber-200">
         <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />

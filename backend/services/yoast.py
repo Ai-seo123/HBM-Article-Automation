@@ -184,7 +184,7 @@ async def analyze(article_content: str, seo_requirements: dict, generated_seo: d
     for attempt in range(2):
         last_error = None
         for url in _get_endpoints():
-            async with httpx.AsyncClient(timeout=30) as client:
+            async with httpx.AsyncClient(timeout=60) as client:
                 try:
                     resp = await client.post(url, json=payload, headers=headers)
                     resp.raise_for_status()
